@@ -1,0 +1,40 @@
+# Build artifacts
+build/
+dist/
+*.app
+*.exe
+*.apk
+*.aab
+
+# Buildozer
+buildozer_workspace/.buildozer/
+buildozer_workspace/bin/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Pytest
+.pytest_cache/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Logs
+*.log
