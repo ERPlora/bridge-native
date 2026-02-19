@@ -25,6 +25,7 @@ from .protocol import (
     print_complete_event,
     print_error_event,
     drawer_opened_event,
+    keyboard_toggled_event,
     error_event,
     generate_job_id,
 )
@@ -157,6 +158,17 @@ async def handle_message(ws, raw: str):
             await ws.send(error_event(f"Notification error: {e}", 'notification_error'))
             logger.error(f"Notification error: {e}")
 
+    elif action == 'toggle_keyboard':
+        visible = msg.get('visible', True)
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, _toggle_keyboard_android, visible)
+            await ws.send(keyboard_toggled_event(visible))
+            logger.info(f"Keyboard toggled: visible={visible}")
+        except Exception as e:
+            await ws.send(error_event(f"Keyboard error: {e}", 'keyboard_error'))
+            logger.error(f"Keyboard toggle error: {e}")
+
     else:
         await ws.send(error_event(f"Unknown action: {action}", 'unknown_action'))
 
@@ -215,6 +227,29 @@ def _show_notification_android(title: str, body: str):
         manager.notify(1, builder.build())
     except Exception as e:
         logger.error(f"Android notification failed: {e}")
+        raise
+
+
+def _toggle_keyboard_android(visible: bool):
+    """Toggle the Android soft keyboard via pyjnius."""
+    try:
+        from jnius import autoclass
+
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        Context = autoclass('android.content.Context')
+        InputMethodManager = autoclass('android.view.inputmethod.InputMethodManager')
+
+        activity = PythonActivity.mActivity
+        imm = activity.getSystemService(Context.INPUT_METHOD_SERVICE)
+
+        if visible:
+            imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0)
+        else:
+            view = activity.getCurrentFocus()
+            if view:
+                imm.hideSoftInputFromWindow(view.getWindowToken(), 0)
+    except Exception as e:
+        logger.error(f"Android keyboard toggle failed: {e}")
         raise
 
 

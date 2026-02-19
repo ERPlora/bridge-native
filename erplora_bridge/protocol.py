@@ -20,6 +20,7 @@ ACTIONS = {
     'open_drawer',
     'test_print',
     'send_notification',
+    'toggle_keyboard',
 }
 
 
@@ -74,6 +75,13 @@ def barcode_event(value: str, barcode_type: str = 'unknown') -> str:
         'event': 'barcode',
         'value': value,
         'type': barcode_type,
+    })
+
+
+def keyboard_toggled_event(visible: bool) -> str:
+    return json.dumps({
+        'event': 'keyboard_toggled',
+        'visible': visible,
     })
 
 

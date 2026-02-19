@@ -1,0 +1,134 @@
+# ==============================================================================
+# ERPlora Bridge — Build & Release
+# ==============================================================================
+# Builds installers for Windows (.exe), Linux (binary), and Android (.apk)
+# Triggered on push to main or manual dispatch.
+#
+# Artifacts are uploaded to the GitHub Release when a tag is pushed,
+# or as workflow artifacts for non-tag pushes.
+# ==============================================================================
+
+name: Build Bridge
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write  # Needed for creating releases
+
+jobs:
+  # ── Windows (.exe) ──────────────────────────────────────────────────────────
+  build-windows:
+    name: Windows (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[build]"
+
+      - name: Build .exe
+        run: |
+          pyinstaller build/windows/erplora_bridge.spec --distpath dist/windows --workpath build/windows/temp --noconfirm
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: erplora-bridge-windows
+          path: dist/windows/erplora-bridge.exe
+
+  # ── Linux (binary) ─────────────────────────────────────────────────────────
+  build-linux:
+    name: Linux (binary)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[build]"
+
+      - name: Build binary
+        run: |
+          pyinstaller build/linux/erplora_bridge.spec --distpath dist/linux --workpath build/linux/temp --noconfirm
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: erplora-bridge-linux
+          path: dist/linux/erplora-bridge
+
+  # ── Android (.apk) ─────────────────────────────────────────────────────────
+  build-android:
+    name: Android (.apk)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare build workspace
+        run: |
+          mkdir -p buildozer_workspace
+          cp build/android/main.py buildozer_workspace/
+          cp -r erplora_bridge buildozer_workspace/
+          cp build/android/buildozer.spec buildozer_workspace/
+
+      - name: Build APK via Docker
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/buildozer_workspace":/home/user/hostcwd \
+            -w /home/user/hostcwd \
+            kivy/buildozer:latest \
+            bash -c 'cd /home/user/hostcwd && buildozer android debug'
+
+      - name: Copy APK to dist
+        run: |
+          mkdir -p dist
+          cp buildozer_workspace/bin/*.apk dist/
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: erplora-bridge-android
+          path: dist/*.apk
+
+  # ── Release (on tag push) ──────────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: [build-windows, build-linux, build-android]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/erplora-bridge-windows/erplora-bridge.exe
+            artifacts/erplora-bridge-linux/erplora-bridge
+            artifacts/erplora-bridge-android/*.apk

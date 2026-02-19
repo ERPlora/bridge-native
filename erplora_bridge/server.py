@@ -23,6 +23,7 @@ from .protocol import (
     print_complete_event,
     print_error_event,
     drawer_opened_event,
+    keyboard_toggled_event,
     error_event,
     generate_job_id,
 )
@@ -167,6 +168,8 @@ async def handle_message(ws: WebSocket, raw: str):
         await handle_test_print(ws, msg)
     elif action == 'send_notification':
         await handle_send_notification(ws, msg)
+    elif action == 'toggle_keyboard':
+        await handle_toggle_keyboard(ws, msg)
     else:
         await ws.send_text(error_event(f"Unknown action: {action}", 'unknown_action'))
 
@@ -302,3 +305,59 @@ def _show_notification(title: str, body: str):
     else:
         # Linux: notify-send
         subprocess.run(['notify-send', title, body], check=True, capture_output=True)
+
+
+async def handle_toggle_keyboard(ws: WebSocket, msg: dict):
+    """Handle toggle_keyboard command — opens/closes OS virtual keyboard."""
+    visible = msg.get('visible', True)
+
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _toggle_keyboard, visible)
+        await ws.send_text(keyboard_toggled_event(visible))
+        logger.info(f"Keyboard toggled: visible={visible}")
+    except Exception as e:
+        await ws.send_text(error_event(f"Keyboard error: {e}", 'keyboard_error'))
+        logger.error(f"Keyboard toggle error: {e}")
+
+
+def _toggle_keyboard(visible: bool):
+    """Toggle the OS virtual keyboard (platform-specific)."""
+    import platform
+    import subprocess
+    system = platform.system()
+
+    if system == 'Windows':
+        if visible:
+            # Kill existing instances first (TabTip stays in background on Win11)
+            subprocess.run(
+                ['taskkill', '/IM', 'TabTip.exe', '/F'],
+                capture_output=True,
+            )
+            import time
+            time.sleep(0.3)
+            # Launch modern touch keyboard
+            import os
+            tabtip = os.path.join(
+                os.environ.get('ProgramFiles', r'C:\Program Files'),
+                'Common Files', 'microsoft shared', 'ink', 'TabTip.exe',
+            )
+            if os.path.exists(tabtip):
+                subprocess.Popen([tabtip])
+            else:
+                # Fallback to legacy on-screen keyboard
+                subprocess.Popen(['osk.exe'])
+        else:
+            # Hide: kill both possible keyboards
+            subprocess.run(['taskkill', '/IM', 'TabTip.exe', '/F'], capture_output=True)
+            subprocess.run(['taskkill', '/IM', 'osk.exe', '/F'], capture_output=True)
+
+    elif system == 'Darwin':
+        raise RuntimeError("Virtual keyboard not supported on macOS (no touchscreen)")
+
+    else:
+        # Linux: try onboard (GNOME on-screen keyboard)
+        if visible:
+            subprocess.Popen(['onboard'])
+        else:
+            subprocess.run(['pkill', 'onboard'], capture_output=True)

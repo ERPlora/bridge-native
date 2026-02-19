@@ -53,6 +53,7 @@ Hub Browser ──WebSocket──► ERPlora Bridge ──USB/Network/BT──�
 {"action": "open_drawer", "printer_id": "usb:0x04b8:0x0202"}
 {"action": "test_print", "printer_id": "usb:0x04b8:0x0202"}
 {"action": "send_notification", "title": "Order Ready", "body": "Table 5"}
+{"action": "toggle_keyboard", "visible": true}
 ```
 
 ### Events (Bridge → Hub)
@@ -63,6 +64,7 @@ Hub Browser ──WebSocket──► ERPlora Bridge ──USB/Network/BT──�
 {"event": "print_complete", "job_id": "uuid"}
 {"event": "print_error", "job_id": "uuid", "error": "Paper out"}
 {"event": "barcode", "value": "1234567890123", "type": "EAN13"}
+{"event": "keyboard_toggled", "visible": true}
 ```
 
 ## Configuration
@@ -167,25 +169,36 @@ pyinstaller build\windows\erplora_bridge.spec ^
 - `upx=True` — compress binaries
 - Single-file mode (all dependencies bundled)
 
-**Via GitHub Actions (recommended for CI):**
-```yaml
-jobs:
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: |
-          cd native
-          pip install -e ".[build]"
-          pyinstaller build/windows/erplora_bridge.spec --distpath dist/windows --noconfirm
-      - uses: actions/upload-artifact@v4
-        with:
-          name: erplora-bridge-windows
-          path: native/dist/windows/erplora-bridge.exe
+---
+
+### Linux (binary)
+
+Builds a single binary file.
+
+**Prerequisites:**
+```bash
+sudo apt-get install libusb-1.0-0-dev
+cd native
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[build]"
 ```
+
+**Build:**
+```bash
+cd native
+source .venv/bin/activate
+pyinstaller build/linux/erplora_bridge.spec \
+    --distpath dist/linux \
+    --workpath build/linux/temp \
+    --noconfirm
+```
+
+**Output**: `dist/linux/erplora-bridge`
+
+**Spec file**: `build/linux/erplora_bridge.spec`
+- `strip=True` — strip debug symbols for smaller binary
+- Single-file mode (all dependencies bundled)
 
 ---
 
@@ -255,6 +268,9 @@ adb install dist/erplorabridge-0.1.0-arm64-v8a-debug.apk
 
 ```
 native/
+├── .github/
+│   └── workflows/
+│       └── build.yml              # CI: builds Windows, Linux, Android on push
 ├── erplora_bridge/
 │   ├── __init__.py          # Version
 │   ├── __main__.py          # CLI entry point (desktop)
@@ -271,6 +287,8 @@ native/
 │   │   └── erplora_bridge.spec    # PyInstaller spec (macOS .app)
 │   ├── windows/
 │   │   └── erplora_bridge.spec    # PyInstaller spec (Windows .exe)
+│   ├── linux/
+│   │   └── erplora_bridge.spec    # PyInstaller spec (Linux binary)
 │   └── android/
 │       ├── buildozer.spec         # Buildozer config
 │       ├── main.py                # Android entry point
@@ -278,6 +296,7 @@ native/
 ├── dist/                          # Build outputs
 │   ├── macos/ERPlora Bridge.app
 │   ├── windows/erplora-bridge.exe
+│   ├── linux/erplora-bridge
 │   └── erplorabridge-*.apk
 ├── buildozer_workspace/           # Android build workspace (generated)
 ├── tests/
@@ -299,6 +318,48 @@ Usage from Hub browser console:
 ```javascript
 ERPlora.bridge.sendNotification('Order Ready', 'Table 5 is ready');
 ```
+
+## CI / GitHub Actions
+
+The workflow at `.github/workflows/build.yml` builds all platforms automatically:
+
+- **Trigger**: Push to `main` or manual `workflow_dispatch`
+- **Release**: When a tag `v*` is pushed, a GitHub Release is created with all artifacts
+
+| Job | Runner | Output |
+|-----|--------|--------|
+| `build-windows` | `windows-latest` | `erplora-bridge.exe` |
+| `build-linux` | `ubuntu-22.04` | `erplora-bridge` (binary) |
+| `build-android` | `ubuntu-22.04` + Docker `kivy/buildozer` | `erplorabridge-*.apk` |
+
+To create a release:
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+---
+
+## Virtual Keyboard
+
+The bridge can open/close the OS virtual keyboard for touchscreen POS terminals:
+
+| Platform | Method | Notes |
+|----------|--------|-------|
+| Windows | `TabTip.exe` (touch keyboard) with `osk.exe` fallback | Best for POS terminals |
+| Android | `InputMethodManager` via pyjnius | Works on tablets |
+| macOS | Not supported | No touchscreen hardware |
+| Linux | `onboard` (GNOME on-screen keyboard) | Requires `onboard` installed |
+
+Usage from Hub browser console:
+```javascript
+ERPlora.bridge.toggleKeyboard(true);   // Show keyboard
+ERPlora.bridge.toggleKeyboard(false);  // Hide keyboard
+```
+
+The Settings UI also shows Show/Hide buttons when the bridge is connected.
+
+---
 
 ## USB Printer Setup
 
