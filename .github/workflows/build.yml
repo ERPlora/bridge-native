@@ -92,10 +92,11 @@ jobs:
       - name: Build APK via Docker
         run: |
           docker run --rm \
+            --entrypoint bash \
             -v "${{ github.workspace }}/buildozer_workspace":/home/user/hostcwd \
             -w /home/user/hostcwd \
             kivy/buildozer:latest \
-            bash -c 'cd /home/user/hostcwd && buildozer android debug'
+            -c 'cd /home/user/hostcwd && buildozer android debug'
 
       - name: Copy APK to dist
         run: |
