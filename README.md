@@ -6,8 +6,9 @@ Native hardware bridge for ERPlora Hub. Connects the Hub browser with local prin
 
 ```bash
 cd native
-uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 
 # Run the bridge
 python -m erplora_bridge
@@ -24,6 +25,7 @@ The bridge opens a WebSocket server on `ws://127.0.0.1:12321/ws`. The Hub browse
 Hub Browser ──WebSocket──► ERPlora Bridge ──USB/Network/BT──► Printer
                                           ──ESC/POS kick──► Cash Drawer
               ◄─barcode events──          ◄──USB HID──── Barcode Scanner
+              ◄─notification──            ──OS notify──► Desktop/Mobile
 ```
 
 1. The bridge runs as a background service (no GUI)
@@ -50,6 +52,7 @@ Hub Browser ──WebSocket──► ERPlora Bridge ──USB/Network/BT──�
 {"action": "print", "printer_id": "usb:0x04b8:0x0202", "document_type": "receipt", "data": {...}, "job_id": "uuid"}
 {"action": "open_drawer", "printer_id": "usb:0x04b8:0x0202"}
 {"action": "test_print", "printer_id": "usb:0x04b8:0x0202"}
+{"action": "send_notification", "title": "Order Ready", "body": "Table 5"}
 ```
 
 ### Events (Bridge → Hub)
@@ -68,29 +71,233 @@ Config is stored at:
 - **macOS**: `~/Library/Application Support/ERPloraBridge/bridge_config.json`
 - **Windows**: `%APPDATA%/ERPloraBridge/bridge_config.json`
 - **Linux**: `~/.config/ERPloraBridge/bridge_config.json`
+- **Android**: Internal app storage
+
+---
 
 ## Building
 
-### macOS
-```bash
-pip install pyinstaller
-pyinstaller build/macos/erplora_bridge.spec
-# Output: dist/ERPlora Bridge.app
-```
+All builds are done from the `native/` directory. PyInstaller is used for desktop builds (macOS, Windows) and Buildozer + Docker for Android.
 
-### Windows
-```bash
-pip install pyinstaller
-pyinstaller build/windows/erplora_bridge.spec
-# Output: dist/erplora-bridge.exe
-```
+### Prerequisites (desktop builds)
 
-### Android
 ```bash
-pip install buildozer
 cd native
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[build]"   # Installs PyInstaller + all dependencies
+```
+
+> **Important**: PyInstaller can only build for the platform it runs on. macOS builds require a Mac, Windows builds require Windows.
+
+---
+
+### macOS (.app bundle)
+
+Builds a background `.app` bundle (`LSBackgroundOnly`, no Dock icon).
+
+**Prerequisites:**
+```bash
+brew install libusb   # Required for USB printer support
+```
+
+**Build:**
+```bash
+cd native
+source .venv/bin/activate
+pyinstaller build/macos/erplora_bridge.spec \
+    --distpath dist/macos \
+    --workpath build/macos/temp \
+    --noconfirm
+```
+
+**Output**: `dist/macos/ERPlora Bridge.app` (~18 MB)
+
+**Test the build:**
+```bash
+# Run the built app
+open "dist/macos/ERPlora Bridge.app"
+
+# Check it's running
+curl http://127.0.0.1:12321/status
+
+# Stop it
+pkill -f erplora-bridge
+```
+
+**Spec file**: `build/macos/erplora_bridge.spec`
+- `console=False` — no terminal window
+- `LSBackgroundOnly=True` — runs as background service
+- `LSUIElement=True` — hidden from Dock
+- `bundle_identifier=com.erplora.bridge`
+
+---
+
+### Windows (.exe)
+
+Builds a single `.exe` file (no console window).
+
+> **Must be built on a Windows machine** (or via CI with a Windows runner). Cannot cross-compile from macOS.
+
+**Prerequisites (on Windows):**
+```powershell
+# Install Python 3.11 from python.org
+cd native
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[build]"
+```
+
+**USB printer support** requires [Zadig](https://zadig.akeo.ie/) to replace the default printer driver with WinUSB.
+
+**Build:**
+```powershell
+cd native
+.venv\Scripts\activate
+pyinstaller build\windows\erplora_bridge.spec ^
+    --distpath dist\windows ^
+    --workpath build\windows\temp ^
+    --noconfirm
+```
+
+**Output**: `dist\windows\erplora-bridge.exe`
+
+**Spec file**: `build/windows/erplora_bridge.spec`
+- `console=False` — no console window
+- `upx=True` — compress binaries
+- Single-file mode (all dependencies bundled)
+
+**Via GitHub Actions (recommended for CI):**
+```yaml
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: |
+          cd native
+          pip install -e ".[build]"
+          pyinstaller build/windows/erplora_bridge.spec --distpath dist/windows --noconfirm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: erplora-bridge-windows
+          path: native/dist/windows/erplora-bridge.exe
+```
+
+---
+
+### Android (.apk)
+
+The Android build uses Docker with the `kivy/buildozer` image. The bridge uses a pure-websockets server (`server_android.py`) instead of FastAPI/uvicorn since those have C dependencies that are hard to cross-compile.
+
+**Prerequisites:**
+- Docker Desktop installed and running
+- ~5 GB disk space (SDK + NDK downloaded on first build)
+
+**Build (recommended):**
+```bash
+cd native
+bash build/android/build.sh
+```
+
+**Output**: `dist/erplorabridge-0.1.0-arm64-v8a-debug.apk` (~13 MB)
+
+**What `build.sh` does:**
+1. Creates a clean `buildozer_workspace/` directory
+2. Copies `main.py` (Android entry point) + `erplora_bridge/` package + `buildozer.spec`
+3. Runs Docker with `kivy/buildozer:latest` (`--platform linux/amd64` for build-tools compat)
+4. Copies the resulting `.apk` to `dist/`
+
+**Build times:**
+- First build: 15-30 min (downloads Android SDK 34, NDK r25b, compiles Python + native libs)
+- Subsequent builds: 2-5 min (SDK/NDK cached in `buildozer_workspace/.buildozer/`)
+
+**Apple Silicon Macs:**
+- Docker runs in `linux/amd64` emulation (Rosetta/QEMU) since Android build-tools (aidl, etc.) are x86_64-only
+- This is slower than native x86_64 but works correctly
+- The `build.sh` script handles the `--platform linux/amd64` flag automatically
+
+**Manual build (without Docker):**
+```bash
+# Requires: JDK 17, Android SDK 34, NDK r25b, Cython<3.0
+pip install buildozer cython==0.29.36
+
+cd native
+
+# Prepare workspace (buildozer needs main.py at root)
+rm -rf buildozer_workspace
+mkdir -p buildozer_workspace
+cp build/android/main.py buildozer_workspace/
+cp -r erplora_bridge buildozer_workspace/
+cp build/android/buildozer.spec buildozer_workspace/
+
+cd buildozer_workspace
 buildozer android debug
-# Output: bin/erplorabridge-0.1.0-debug.apk
+```
+
+**Gotchas:**
+- Workspace directory must NOT start with `.` (buildozer skips dot-directories)
+- `android.no-byte-compile-python = True` is needed on macOS to avoid hostpython path issues
+- The Android version uses `server_android.py` (pure websockets) instead of `server.py` (FastAPI)
+- Only ARM64 is built by default (`android.archs = arm64-v8a`)
+
+**Install on device:**
+```bash
+adb install dist/erplorabridge-0.1.0-arm64-v8a-debug.apk
+```
+
+---
+
+## Architecture
+
+```
+native/
+├── erplora_bridge/
+│   ├── __init__.py          # Version
+│   ├── __main__.py          # CLI entry point (desktop)
+│   ├── config.py            # BridgeConfig (JSON persistence)
+│   ├── protocol.py          # WebSocket protocol constants & helpers
+│   ├── server.py            # FastAPI + WebSocket server (desktop)
+│   ├── server_android.py    # Pure websockets server (Android)
+│   └── hardware/
+│       ├── discovery.py     # USB, mDNS, network, BT printer discovery
+│       ├── printing.py      # ESC/POS print rendering
+│       └── scanner.py       # Barcode scanner listener
+├── build/
+│   ├── macos/
+│   │   └── erplora_bridge.spec    # PyInstaller spec (macOS .app)
+│   ├── windows/
+│   │   └── erplora_bridge.spec    # PyInstaller spec (Windows .exe)
+│   └── android/
+│       ├── buildozer.spec         # Buildozer config
+│       ├── main.py                # Android entry point
+│       └── build.sh               # Docker build script
+├── dist/                          # Build outputs
+│   ├── macos/ERPlora Bridge.app
+│   ├── windows/erplora-bridge.exe
+│   └── erplorabridge-*.apk
+├── buildozer_workspace/           # Android build workspace (generated)
+├── tests/
+└── pyproject.toml
+```
+
+## Notifications
+
+The bridge supports sending OS-level notifications from the Hub:
+
+| Platform | Method |
+|----------|--------|
+| macOS | `osascript -e 'display notification'` |
+| Windows | PowerShell `New-BurntToastNotification` |
+| Linux | `notify-send` |
+| Android | Native `NotificationManager` via pyjnius |
+
+Usage from Hub browser console:
+```javascript
+ERPlora.bridge.sendNotification('Order Ready', 'Table 5 is ready');
 ```
 
 ## USB Printer Setup
