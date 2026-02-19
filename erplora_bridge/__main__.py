@@ -71,7 +71,7 @@ def main():
 
     logger = logging.getLogger('erplora.bridge')
     logger.info(f"ERPlora Bridge v{__version__}")
-    logger.info(f"Config: {config.get_config_path()}")
+    logger.info(f"Config: {config._path}")
     logger.info(f"Starting WebSocket server on {host}:{port}")
 
     uvicorn.run(

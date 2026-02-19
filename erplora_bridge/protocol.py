@@ -19,6 +19,7 @@ ACTIONS = {
     'print',
     'open_drawer',
     'test_print',
+    'send_notification',
 }
 
 

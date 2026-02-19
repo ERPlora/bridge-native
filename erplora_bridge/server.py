@@ -165,6 +165,8 @@ async def handle_message(ws: WebSocket, raw: str):
         await handle_open_drawer(ws, msg)
     elif action == 'test_print':
         await handle_test_print(ws, msg)
+    elif action == 'send_notification':
+        await handle_send_notification(ws, msg)
     else:
         await ws.send_text(error_event(f"Unknown action: {action}", 'unknown_action'))
 
@@ -262,3 +264,41 @@ async def handle_test_print(ws: WebSocket, msg: dict):
     except Exception as e:
         await ws.send_text(print_error_event(job_id, str(e)))
         logger.error(f"Test print failed: {e}")
+
+
+async def handle_send_notification(ws: WebSocket, msg: dict):
+    """Handle send_notification command — shows OS-level notification."""
+    title = msg.get('title', 'ERPlora')
+    body = msg.get('body', '')
+
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(None, _show_notification, title, body)
+        logger.info(f"Notification sent: {title}")
+    except Exception as e:
+        await ws.send_text(error_event(f"Notification error: {e}", 'notification_error'))
+        logger.error(f"Notification error: {e}")
+
+
+def _show_notification(title: str, body: str):
+    """Show an OS-level notification (platform-specific)."""
+    import platform
+    import subprocess
+    system = platform.system()
+
+    if system == 'Darwin':
+        script = f'display notification "{body}" with title "{title}"'
+        subprocess.run(['osascript', '-e', script], check=True, capture_output=True)
+    elif system == 'Windows':
+        ps_cmd = (
+            f'[System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms") | Out-Null; '
+            f'$n = New-Object System.Windows.Forms.NotifyIcon; '
+            f'$n.Icon = [System.Drawing.SystemIcons]::Information; '
+            f'$n.Visible = $true; '
+            f'$n.ShowBalloonTip(5000, "{title}", "{body}", "Info"); '
+            f'Start-Sleep -Seconds 6; $n.Dispose()'
+        )
+        subprocess.run(['powershell', '-Command', ps_cmd], check=True, capture_output=True)
+    else:
+        # Linux: notify-send
+        subprocess.run(['notify-send', title, body], check=True, capture_output=True)

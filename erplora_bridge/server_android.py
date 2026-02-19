@@ -146,6 +146,17 @@ async def handle_message(ws, raw: str):
         except Exception as e:
             await ws.send(print_error_event(job_id, str(e)))
 
+    elif action == 'send_notification':
+        title = msg.get('title', 'ERPlora')
+        body = msg.get('body', '')
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(None, _show_notification_android, title, body)
+            logger.info(f"Notification sent: {title}")
+        except Exception as e:
+            await ws.send(error_event(f"Notification error: {e}", 'notification_error'))
+            logger.error(f"Notification error: {e}")
+
     else:
         await ws.send(error_event(f"Unknown action: {action}", 'unknown_action'))
 
@@ -169,6 +180,42 @@ def main():
     port = config.port
     # On Android, bind to 0.0.0.0 so the browser on the same device can connect
     asyncio.run(run_server('0.0.0.0', port))
+
+
+def _show_notification_android(title: str, body: str):
+    """Show an Android notification via pyjnius."""
+    try:
+        from jnius import autoclass
+
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        Context = autoclass('android.content.Context')
+        NotificationBuilder = autoclass('android.app.Notification$Builder')
+        NotificationManager = autoclass('android.app.NotificationManager')
+
+        activity = PythonActivity.mActivity
+        manager = activity.getSystemService(Context.NOTIFICATION_SERVICE)
+
+        # Android 8+ requires a notification channel
+        if autoclass('android.os.Build$VERSION').SDK_INT >= 26:
+            NotificationChannel = autoclass('android.app.NotificationChannel')
+            channel = NotificationChannel(
+                'erplora_bridge', 'ERPlora Bridge',
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+            manager.createNotificationChannel(channel)
+            builder = NotificationBuilder(activity, 'erplora_bridge')
+        else:
+            builder = NotificationBuilder(activity)
+
+        builder.setContentTitle(title)
+        builder.setContentText(body)
+        builder.setSmallIcon(activity.getApplicationInfo().icon)
+        builder.setAutoCancel(True)
+
+        manager.notify(1, builder.build())
+    except Exception as e:
+        logger.error(f"Android notification failed: {e}")
+        raise
 
 
 if __name__ == '__main__':

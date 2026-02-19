@@ -32,16 +32,15 @@ ESCPOS_NETWORK_PORT = 9100
 
 
 def discover_all() -> list[dict]:
-    """Discover all available printers (USB + network + Bluetooth)."""
+    """Discover all available printers (USB + network + Bluetooth).
+
+    Runs USB and mDNS discovery (fast). Skips the slow subnet port scan
+    and Bluetooth BLE scan to avoid blocking for 60+ seconds.
+    """
     printers = []
 
     printers.extend(discover_usb())
-    printers.extend(discover_network())
-
-    # Bluetooth discovery is platform-dependent and slower
-    system = platform.system()
-    if system in ('Darwin', 'Windows', 'Linux'):
-        printers.extend(discover_bluetooth())
+    printers.extend(_discover_mdns())
 
     return printers
 
