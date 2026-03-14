@@ -21,11 +21,29 @@ The bridge opens a WebSocket server on `ws://127.0.0.1:12321/ws`. The Hub browse
 
 ## How It Works
 
-```
-Hub Browser ──WebSocket──► ERPlora Bridge ──USB/Network/BT──► Printer
-                                          ──ESC/POS kick──► Cash Drawer
-              ◄─barcode events──          ◄──USB HID──── Barcode Scanner
-              ◄─notification──            ──OS notify──► Desktop/Mobile
+```mermaid
+graph LR
+    subgraph Hub Browser
+        JS[bridge.js]
+    end
+
+    subgraph ERPlora Bridge
+        WS[WebSocket Server<br>ws://localhost:12321]
+        HW[Hardware Layer]
+    end
+
+    subgraph Devices
+        P[Printer<br>ESC/POS]
+        D[Cash Drawer]
+        S[Barcode Scanner]
+    end
+
+    JS -- "print, open_drawer,<br>discover_printers" --> WS
+    WS -- "print_complete,<br>printers, barcode" --> JS
+    WS --> HW
+    HW -- "USB / Network / BT" --> P
+    HW -- "ESC/POS kick" --> D
+    S -- "USB HID" --> HW
 ```
 
 1. The bridge runs as a background service (no GUI)
@@ -266,11 +284,52 @@ adb install dist/erplorabridge-0.1.0-arm64-v8a-debug.apk
 
 ## Architecture
 
+### Component overview
+
+```mermaid
+graph TB
+    subgraph "Hub Browser"
+        BJS["bridge.js<br>(Alpine.store)"]
+    end
+
+    subgraph "ERPlora Bridge (native app)"
+        direction TB
+        SRV["server.py (Desktop)<br>FastAPI + uvicorn"]
+        SRVA["server_android.py<br>pure websockets"]
+        PROTO["protocol.py<br>message format"]
+        CFG["config.py<br>JSON persistence"]
+
+        subgraph "hardware/"
+            DISC["discovery.py<br>USB, mDNS, network, BT"]
+            PRINT["printing.py<br>ESC/POS rendering"]
+            SCAN["scanner.py<br>barcode listener"]
+        end
+
+        SRV --> PROTO
+        SRVA --> PROTO
+        PROTO --> DISC & PRINT & SCAN
+    end
+
+    subgraph "Physical Devices"
+        PR["Thermal Printer"]
+        CD["Cash Drawer"]
+        BS["Barcode Scanner"]
+    end
+
+    BJS <-- "WebSocket<br>ws://localhost:12321" --> SRV
+    BJS <-- "WebSocket<br>ws://localhost:12321" --> SRVA
+    PRINT --> PR
+    PRINT -- "ESC/POS kick" --> CD
+    SCAN <-- "USB HID" --> BS
+```
+
+### Directory structure
+
 ```
 native/
 ├── .github/
 │   └── workflows/
-│       └── build.yml              # CI: builds Windows, Linux, Android on push
+│       └── build.yml              # CI: builds Win/Linux/Android → S3
 ├── erplora_bridge/
 │   ├── __init__.py          # Version
 │   ├── __main__.py          # CLI entry point (desktop)
@@ -319,23 +378,97 @@ Usage from Hub browser console:
 ERPlora.bridge.sendNotification('Order Ready', 'Table 5 is ready');
 ```
 
-## CI / GitHub Actions
+## CI / CD Pipeline
 
-The workflow at `.github/workflows/build.yml` builds all platforms automatically:
+### Build & Distribution Flow
 
-- **Trigger**: Push to `main` or manual `workflow_dispatch`
-- **Release**: When a tag `v*` is pushed, a GitHub Release is created with all artifacts
+```mermaid
+graph TB
+    subgraph Trigger
+        PUSH["git push main"]
+        TAG["git tag v0.1.0<br>git push origin v0.1.0"]
+        MANUAL["workflow_dispatch<br>(GitHub UI)"]
+    end
 
-| Job | Runner | Output |
-|-----|--------|--------|
-| `build-windows` | `windows-latest` | `erplora-bridge.exe` |
-| `build-linux` | `ubuntu-22.04` | `erplora-bridge` (binary) |
-| `build-android` | `ubuntu-22.04` + Docker `kivy/buildozer` | `erplorabridge-*.apk` |
+    subgraph "GitHub Actions (parallel builds)"
+        WIN["build-windows<br>windows-latest<br>PyInstaller → .exe"]
+        LIN["build-linux<br>ubuntu-22.04<br>PyInstaller → binary"]
+        AND["build-android<br>ubuntu-22.04<br>Docker + Buildozer → .apk"]
+    end
 
-To create a release:
+    subgraph "Upload to S3"
+        S3["upload-s3<br>aws s3 cp → erplora-downloads"]
+    end
+
+    subgraph "Local (Mac only)"
+        MAC["pyinstaller → .app/.dmg<br>aws s3 cp (manual)"]
+    end
+
+    subgraph "S3: erplora-downloads/bridge/"
+        LATEST["latest/<br>erplora-bridge.exe<br>erplora-bridge-linux<br>erplora-bridge.apk<br>erplora-bridge-macos.dmg"]
+        VER["v0.1.0/<br>(same files, versioned)"]
+    end
+
+    subgraph "Cloud Portal"
+        DL["Download page<br>pre-signed URLs"]
+    end
+
+    PUSH --> WIN & LIN & AND
+    TAG --> WIN & LIN & AND
+    MANUAL --> WIN & LIN & AND
+    WIN & LIN & AND --> S3
+    S3 -- "push main" --> LATEST
+    S3 -- "tag v*" --> VER
+    S3 -- "tag v* (also)" --> LATEST
+    MAC --> LATEST
+    MAC --> VER
+    LATEST --> DL
+    VER --> DL
+```
+
+### How it works
+
+| Platform | Where it builds | How it reaches S3 |
+|----------|----------------|-------------------|
+| Windows (.exe) | GitHub Actions (`windows-latest`) | Automatic (CI workflow) |
+| Linux (binary) | GitHub Actions (`ubuntu-22.04`) | Automatic (CI workflow) |
+| Android (.apk) | GitHub Actions (`ubuntu-22.04` + Docker) | Automatic (CI workflow) |
+| macOS (.app/.dmg) | **Local Mac** (requires Xcode/signing) | Manual: `aws s3 cp` |
+
+### S3 layout
+
+```
+s3://erplora-downloads/bridge/
+├── latest/                         ← always points to most recent build
+│   ├── erplora-bridge.exe          # Windows
+│   ├── erplora-bridge-linux        # Linux
+│   ├── erplora-bridge.apk          # Android
+│   └── erplora-bridge-macos.dmg    # macOS (manual upload)
+└── v0.1.0/                         ← created on tag push
+    ├── erplora-bridge.exe
+    ├── erplora-bridge-linux
+    ├── erplora-bridge.apk
+    └── erplora-bridge-macos.dmg
+```
+
+### GitHub Actions secrets required
+
+| Secret | Description |
+|--------|-------------|
+| `AWS_ACCESS_KEY_ID` | IAM user with `s3:PutObject` on `erplora-downloads/bridge/*` |
+| `AWS_SECRET_ACCESS_KEY` | Corresponding secret key |
+
+### Creating a versioned release
+
 ```bash
+# 1. Tag the commit
 git tag v0.1.0
 git push origin v0.1.0
+# → CI builds all 3 platforms → uploads to bridge/v0.1.0/ AND bridge/latest/
+
+# 2. Upload macOS build manually
+aws s3 cp dist/macos/erplora-bridge-macos.dmg s3://erplora-downloads/bridge/v0.1.0/erplora-bridge-macos.dmg
+aws s3 cp dist/macos/erplora-bridge-macos.dmg s3://erplora-downloads/bridge/latest/erplora-bridge-macos.dmg
 ```
 
 ---

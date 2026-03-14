@@ -1,26 +1,48 @@
 # ==============================================================================
-# ERPlora Bridge — Build & Release
+# ERPlora Bridge — Build & Upload to S3
 # ==============================================================================
-# Builds installers for Windows (.exe), Linux (binary), and Android (.apk)
-# Triggered on push to main or manual dispatch.
 #
-# Artifacts are uploaded to the GitHub Release when a tag is pushed,
-# or as workflow artifacts for non-tag pushes.
+# Pipeline overview:
+#
+#   git push main ──► GitHub Actions ──► Build (3 platforms) ──► S3 upload
+#   git push v*   ──► GitHub Actions ──► Build (3 platforms) ──► S3 upload (versioned + latest)
+#   Local Mac     ──► pyinstaller    ──► aws s3 cp (manual)
+#
+# S3 layout:
+#   s3://erplora-downloads/bridge/
+#   ├── latest/
+#   │   ├── erplora-bridge.exe          # Windows
+#   │   ├── erplora-bridge-linux        # Linux
+#   │   ├── erplora-bridge.apk          # Android
+#   │   └── erplora-bridge-macos.dmg    # macOS (uploaded manually)
+#   └── v0.1.0/                         # Version-specific (on tag push)
+#       ├── erplora-bridge.exe
+#       ├── erplora-bridge-linux
+#       ├── erplora-bridge.apk
+#       └── erplora-bridge-macos.dmg
+#
+# Secrets required (repo settings → Secrets → Actions):
+#   - AWS_ACCESS_KEY_ID
+#   - AWS_SECRET_ACCESS_KEY
+#
 # ==============================================================================
 
 name: Build Bridge
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
-  workflow_dispatch:
+    branches: [main]    # Build on every push to main
+    tags: ['v*']        # Also build + version on tag push (e.g. v0.1.0)
+  workflow_dispatch:    # Allow manual trigger from GitHub UI
 
 permissions:
-  contents: write  # Needed for creating releases
+  contents: read        # Only needs to read the repo (no releases)
 
 jobs:
+
   # ── Windows (.exe) ──────────────────────────────────────────────────────────
+  # Builds a single .exe with PyInstaller on a Windows runner.
+  # No console window (spec: console=False).
   build-windows:
     name: Windows (.exe)
     runs-on: windows-latest
@@ -31,14 +53,17 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Install project + PyInstaller (defined in pyproject.toml [build] extra)
       - name: Install dependencies
         run: |
           pip install -e ".[build]"
 
+      # PyInstaller reads the .spec file which defines: single-file, no console, UPX compression
       - name: Build .exe
         run: |
           pyinstaller build/windows/erplora_bridge.spec --distpath dist/windows --workpath build/windows/temp --noconfirm
 
+      # Save as GitHub Actions artifact (consumed by upload-s3 job)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -46,6 +71,8 @@ jobs:
           path: dist/windows/erplora-bridge.exe
 
   # ── Linux (binary) ─────────────────────────────────────────────────────────
+  # Builds a single binary with PyInstaller on Ubuntu.
+  # Requires libusb for USB printer support.
   build-linux:
     name: Linux (binary)
     runs-on: ubuntu-22.04
@@ -56,6 +83,7 @@ jobs:
         with:
           python-version: '3.11'
 
+      # libusb is needed for python-escpos USB printer communication
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -65,6 +93,7 @@ jobs:
         run: |
           pip install -e ".[build]"
 
+      # PyInstaller spec: single-file, strip debug symbols
       - name: Build binary
         run: |
           pyinstaller build/linux/erplora_bridge.spec --distpath dist/linux --workpath build/linux/temp --noconfirm
@@ -76,12 +105,18 @@ jobs:
           path: dist/linux/erplora-bridge
 
   # ── Android (.apk) ─────────────────────────────────────────────────────────
+  # Builds an APK using Buildozer inside Docker.
+  # Uses kivy/buildozer image which includes Android SDK 34 + NDK r25b.
+  # The Android version uses server_android.py (pure websockets, no FastAPI)
+  # because uvicorn has C extensions that don't cross-compile to Android.
   build-android:
     name: Android (.apk)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
+      # Buildozer expects main.py at the workspace root.
+      # We copy the Android entry point + bridge package + spec into a clean dir.
       - name: Prepare build workspace
         run: |
           mkdir -p buildozer_workspace
@@ -89,6 +124,8 @@ jobs:
           cp -r erplora_bridge buildozer_workspace/
           cp build/android/buildozer.spec buildozer_workspace/
 
+      # Docker build: mounts workspace, runs buildozer inside the container.
+      # Only builds ARM64 (arm64-v8a) — covers 99%+ of modern Android devices.
       - name: Build APK via Docker
         run: |
           docker run --rm \
@@ -110,13 +147,20 @@ jobs:
           name: erplora-bridge-android
           path: dist/*.apk
 
-  # ── Release (on tag push) ──────────────────────────────────────────────────
-  release:
-    name: Create Release
+  # ── Upload to S3 ───────────────────────────────────────────────────────────
+  # Runs after all 3 builds complete.
+  # Downloads artifacts from previous jobs and uploads to S3.
+  #
+  # On push to main:  uploads to bridge/latest/
+  # On tag push v*:   uploads to bridge/v0.1.0/ AND updates bridge/latest/
+  #
+  # Cloud serves downloads via pre-signed URLs (never public).
+  upload-s3:
+    name: Upload to S3
     needs: [build-windows, build-linux, build-android]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      # Collect all artifacts from the 3 build jobs into artifacts/ directory
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -125,11 +169,44 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      # AWS credentials stored as GitHub repo secrets
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          generate_release_notes: true
-          files: |
-            artifacts/erplora-bridge-windows/erplora-bridge.exe
-            artifacts/erplora-bridge-linux/erplora-bridge
-            artifacts/erplora-bridge-android/*.apk
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      - name: Upload to S3
+        run: |
+          # Determine version folder: "v0.1.0" for tags, "latest" for main pushes
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+          else
+            VERSION="latest"
+          fi
+
+          # Upload each platform artifact with a consistent filename
+          aws s3 cp artifacts/erplora-bridge-windows/erplora-bridge.exe \
+            "s3://erplora-downloads/bridge/${VERSION}/erplora-bridge.exe"
+
+          aws s3 cp artifacts/erplora-bridge-linux/erplora-bridge \
+            "s3://erplora-downloads/bridge/${VERSION}/erplora-bridge-linux"
+
+          # APK filename includes version+arch, normalize to erplora-bridge.apk
+          for apk in artifacts/erplora-bridge-android/*.apk; do
+            aws s3 cp "$apk" "s3://erplora-downloads/bridge/${VERSION}/erplora-bridge.apk"
+          done
+
+          # When pushing a versioned tag, also update "latest" so it always
+          # points to the most recent release
+          if [[ "$VERSION" != "latest" ]]; then
+            aws s3 cp "s3://erplora-downloads/bridge/${VERSION}/erplora-bridge.exe" \
+              "s3://erplora-downloads/bridge/latest/erplora-bridge.exe"
+            aws s3 cp "s3://erplora-downloads/bridge/${VERSION}/erplora-bridge-linux" \
+              "s3://erplora-downloads/bridge/latest/erplora-bridge-linux"
+            aws s3 cp "s3://erplora-downloads/bridge/${VERSION}/erplora-bridge.apk" \
+              "s3://erplora-downloads/bridge/latest/erplora-bridge.apk"
+          fi
+
+          echo "Uploaded to s3://erplora-downloads/bridge/${VERSION}/"
